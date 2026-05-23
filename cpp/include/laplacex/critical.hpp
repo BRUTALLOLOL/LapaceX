@@ -69,6 +69,30 @@ std::vector<ExponentialComponent> decompose(
     const DecomposeConfig& cfg = {}
 );
 
+/**
+ * Decompose using iterative deflation: repeatedly extracts the dominant mode
+ * from the residual, then jointly refines all found components via ALS.
+ *
+ * This overcomes the single-pass CWT limitation of missing weak components
+ * when their amplitude ratio exceeds ~4:1 relative to a dominant mode.
+ *
+ * @param t              Strictly increasing time values (t > 0)
+ * @param f              Signal values at t
+ * @param cfg            Decomposition configuration (thresholds are internally
+ *                       relaxed for residual detection)
+ * @param max_components Maximum number of components to extract (default 5)
+ * @param energy_tol     Stop when residual energy < energy_tol * original_energy
+ *                       (default 1e-6)
+ * @return               Sorted (by significance, descending) list of components
+ */
+std::vector<ExponentialComponent> decompose_deflate(
+    const std::vector<double>& t,
+    const std::vector<double>& f,
+    const DecomposeConfig& cfg = {},
+    int max_components = 5,
+    double energy_tol = 1e-6
+);
+
 // ---------------------------------------------------------------------------
 // Reconstruction
 // ---------------------------------------------------------------------------
