@@ -18,7 +18,7 @@ from laplacex._laplacex import (
     forward_discrete as _forward_discrete,
     inverse_weeks    as _inverse_weeks,
     decompose        as _decompose_cpp,
-    decompose_deflate as _decompose_deflate_cpp,  # ← добавить
+    decompose_deflate as _decompose_deflate_cpp,
     reconstruct      as _reconstruct_cpp,
 )
 from laplacex.components import ExponentialComponents
@@ -188,8 +188,8 @@ def decompose(
     # Auto-deflate if single-pass missed weak components
     if auto_deflate and len(comps) <= 1:
         f_hat = ExponentialComponents(comps).reconstruct(t_arr)
-        residual_energy = np.sum((f_arr - f_hat)**2)
-        original_energy = np.sum(f_arr**2)
+        residual_energy = np.sum((f_arr - f_hat) ** 2)
+        original_energy = np.sum(f_arr ** 2)
 
         if residual_energy > energy_tol * original_energy:
             comps = _decompose_deflate_cpp(
@@ -198,6 +198,7 @@ def decompose(
             )
 
     return ExponentialComponents(comps)
+
 
 def reconstruct(
     components: ExponentialComponents,
