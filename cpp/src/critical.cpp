@@ -443,6 +443,96 @@ std::vector<ExponentialComponent> decompose(
 }
 
 // ---------------------------------------------------------------------------
+// decompose_deflate – iteratively finds components by deflation
+// ---------------------------------------------------------------------------
+std::vector<ExponentialComponent> decompose_deflate(
+    const std::vector<double>& t,
+    const std::vector<double>& f,
+    const DecomposeConfig& cfg,
+    int max_components,
+    double energy_tol)
+{
+    if (max_components <= 0) max_components = 5;
+    if (energy_tol <= 0.0) energy_tol = 1e-6;
+
+    // Use a copy of config tuned for weak component detection
+    DecomposeConfig defl_cfg = cfg;
+    defl_cfg.use_aic = false;               // we decide when to stop
+    defl_cfg.snr_threshold = cfg.snr_threshold * 0.5;   // lower threshold to catch weak modes
+    defl_cfg.ridge_threshold = cfg.ridge_threshold * 0.5;
+    defl_cfg.min_ridge_len = std::max(1, cfg.min_ridge_len - 1); // may be shorter
+
+    // Work on a copy of the data to deflate
+    std::vector<double> residual = f;
+    double original_energy = std::inner_product(f.begin(), f.end(), f.begin(), 0.0);
+    std::vector<ExponentialComponent> all_comps;
+
+    for (int iter = 0; iter < max_components; ++iter) {
+        // Run standard decompose on the residual
+        auto comps = decompose(t, residual, defl_cfg);
+        if (comps.empty()) break;
+
+        // Take the strongest component
+        ExponentialComponent comp = comps.front(); // already sorted by significance
+        // Reconstruct its contribution using original t grid
+        std::vector<double> single_recon = reconstruct({comp}, t);
+        // Subtract from residual
+        for (std::size_t i = 0; i < residual.size(); ++i)
+            residual[i] -= single_recon[i];
+
+        all_comps.push_back(comp);
+
+        // Stop if residual energy is tiny relative to original
+        double residual_energy = std::inner_product(residual.begin(), residual.end(), residual.begin(), 0.0);
+        if (residual_energy < energy_tol * original_energy)
+            break;
+    }
+
+    if (all_comps.empty()) return {};
+
+    // Joint refinement of all found components on the original data
+    refine_components_als(all_comps, t, f);
+
+    // Normalise significance
+    double sum_abs = 0.0;
+    for (const auto& c : all_comps) sum_abs += std::abs(c.amplitude);
+    if (sum_abs > 0.0) {
+        for (auto& c : all_comps)
+            c.significance = std::abs(c.amplitude) / sum_abs;
+    }
+
+    // Sort by significance
+    std::sort(all_comps.begin(), all_comps.end(),
+        [](const ExponentialComponent& a, const ExponentialComponent& b) {
+            return a.significance > b.significance;
+        });
+
+    // Optional AIC pruning on the final set using original cfg's flag
+    if (cfg.use_aic && all_comps.size() > 1) {
+        auto rss = [&](std::size_t k) {
+            auto sub = std::vector<ExponentialComponent>(all_comps.begin(), all_comps.begin()+k);
+            auto r   = reconstruct(sub, t);
+            double s = 0;
+            for (std::size_t idx = 0; idx < t.size(); ++idx) {
+                double d = r[idx] - f[idx];
+                s += d * d;
+            }
+            return s;
+        };
+
+        int best_k = 1;
+        double best_aic = std::log(rss(1) / t.size()) + 2.0 * 3;
+        for (std::size_t k = 2; k <= all_comps.size(); ++k) {
+            double a = std::log(rss(k) / t.size()) + 2.0 * 3 * k;
+            if (a < best_aic) { best_aic = a; best_k = static_cast<int>(k); }
+        }
+        all_comps.resize(best_k);
+    }
+
+    return all_comps;
+}
+
+// ---------------------------------------------------------------------------
 // reconstruct
 // ---------------------------------------------------------------------------
 std::vector<double> reconstruct(
