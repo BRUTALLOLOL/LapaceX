@@ -6,6 +6,7 @@
 #include <thread>
 #include <future>
 #include <numeric>
+#include <vector>    // already included via core.hpp, but for clarity
 
 namespace laplacex {
 
@@ -97,22 +98,14 @@ std::complex<double> forward(
             "laplacex::forward requires Re(s) >= 0 for convergence");
     }
 
-    // Transform: u = e^x, t = e^u so x goes from -inf to +inf
-    // But we integrate over t directly on (0, T_max] with exponential
-    // compression: split into geometric panels so each panel contributes
-    // roughly equally to the transform.
-
-    // Build panel breakpoints: 0, eps, 1/|s|, 10/|s|, t_max
     double sigma  = std::real(s);
     double s_abs  = std::abs(s);
     double center = (s_abs > 0) ? 1.0 / s_abs : 1.0;
 
     std::vector<double> breaks;
     breaks.push_back(1e-15);
-    // geometric runup to center
     for (double x = 1e-6; x < center; x *= 4.0)  breaks.push_back(x);
     breaks.push_back(center);
-    // geometric rundown from center
     for (double x = center * 4.0; x < cfg.t_max; x *= 4.0) breaks.push_back(x);
     breaks.push_back(cfg.t_max);
     std::sort(breaks.begin(), breaks.end());
@@ -130,7 +123,8 @@ std::complex<double> forward(
 }
 
 // ---------------------------------------------------------------------------
-// Batch forward (parallelised over s values)
+// Batch forward (parallelised over s values) – used only from native C++,
+// Python interface uses sequential loop to avoid GIL issues.
 // ---------------------------------------------------------------------------
 std::vector<std::complex<double>> forward_batch(
     const std::function<double(double)>& f,
@@ -193,10 +187,8 @@ struct CubicSpline {
 
     double eval(double x) const {
         int n = static_cast<int>(t.size()) - 1;
-        // clamp
         if (x <= t.front()) return a.front();
         if (x >= t.back())  return a.back();
-        // binary search
         int lo = 0, hi = n - 1;
         while (lo < hi) { int mid = (lo+hi)/2; if (t[mid+1] < x) lo=mid+1; else hi=mid; }
         double dx = x - t[lo];
@@ -219,60 +211,62 @@ std::vector<std::complex<double>> forward_discrete(
 }
 
 // ---------------------------------------------------------------------------
-// Inverse – Weeks method
+// Inverse – Stehfest algorithm (replaces the original flawed Weeks method)
 // ---------------------------------------------------------------------------
 std::vector<double> inverse_weeks(
     const std::function<std::complex<double>(std::complex<double>)>& F,
     const std::vector<double>& t_eval,
-    double sigma, double b, int N,
-    const TransformConfig& cfg)
+    double /*sigma*/, double /*b*/, int N,
+    const TransformConfig& /*cfg*/)
 {
-    // Auto-select parameters if not provided
-    if (sigma <= 0.0) sigma = 1.0;
-    if (b     <= 0.0) b     = 1.0;
+    // Cap N to avoid catastrophic cancellation (weights explode for N > ~20)
+    constexpr int N_MAX = 18;
+    int N_use = std::min(N, N_MAX);
+    if (N_use % 2 != 0) N_use++;   // must be even
 
-    // Compute Laguerre coefficients via FFT-free direct summation
-    // c_n = (b / pi) * Re{ integral_0^{2pi} F(s_k) * L_n(.) d theta }
-    // We use the trapezoidal rule on the circle s = sigma + b*(1+e^{i theta})/(1-e^{i theta})
+    // Pre‑compute log factorials up to 2*N_use
+    std::vector<double> log_fact(2 * N_use + 1, 0.0);
+    for (int i = 2; i <= 2 * N_use; ++i)
+        log_fact[i] = log_fact[i-1] + std::log(static_cast<double>(i));
 
-    int M = 4 * N; // quadrature points on circle
-    std::vector<double> c(N, 0.0);
+    const int M = N_use / 2;
+    const double LN2 = std::log(2.0);
 
-    for (int m = 0; m < M; ++m) {
-        double theta = 2.0 * M_PI * m / M;
-        std::complex<double> z  = std::exp(std::complex<double>(0, theta));
-        std::complex<double> s  = sigma + b * (1.0 + z) / (1.0 - z);
-        std::complex<double> Fs = F(s) * b / (1.0 - z) / (1.0 - z);
+    // Compute Stehfest weights V_k (k = 1 … N_use) in log‑space
+    std::vector<double> V(N_use + 1, 0.0);  // index 1..N_use
+    for (int k = 1; k <= N_use; ++k) {
+        double sum_pos = 0.0;               // positive part
+        int j_start = (k + 1) / 2;
+        int j_end   = std::min(k, M);
 
-        // Laguerre polynomials L_0..L_{N-1} evaluated at (2b/s-b)*... 
-        // simplified: use recurrence
-        double arg = 2.0 * b / std::real(1.0 / (s - sigma) + 1.0); // safe approx
-        std::vector<double> L(N);
-        L[0] = 1.0;
-        if (N > 1) L[1] = 1.0 - arg;
-        for (int n = 2; n < N; ++n)
-            L[n] = ((2*n - 1 - arg) * L[n-1] - (n-1) * L[n-2]) / n;
-
-        for (int n = 0; n < N; ++n)
-            c[n] += std::real(Fs) * L[n] / M;
+        for (int j = j_start; j <= j_end; ++j) {
+            // log term = M * log(j) + log((2j)!) - [log((M-j)!) + log(j!) + log((j-1)!) + log((k-j)!) + log((2j-k)!)]
+            double log_term = M * std::log(static_cast<double>(j))
+                            + log_fact[2*j]
+                            - (log_fact[M - j] + log_fact[j] + log_fact[j-1] + log_fact[k - j] + log_fact[2*j - k]);
+            sum_pos += std::exp(log_term);
+        }
+        // Apply sign factor: V_k = (-1)^{k + M} * sum_pos
+        if ((k + M) % 2 != 0) sum_pos = -sum_pos;
+        V[k] = sum_pos;
     }
 
-    // Reconstruct f(t) = exp(sigma*t) * sum_n c_n * L_n(b*t) * exp(-b*t)
+    // Evaluate f(t) for each requested t
     std::vector<double> out(t_eval.size());
     for (std::size_t i = 0; i < t_eval.size(); ++i) {
-        double tt  = t_eval[i];
-        double arg = b * tt;
-        std::vector<double> L(N);
-        L[0] = 1.0;
-        if (N > 1) L[1] = 1.0 - arg;
-        for (int n = 2; n < N; ++n)
-            L[n] = ((2*n - 1 - arg) * L[n-1] - (n-1) * L[n-2]) / n;
-
-        double val = 0.0;
-        for (int n = 0; n < N; ++n)
-            val += c[n] * L[n];
-
-        out[i] = val * std::exp((sigma - b) * tt);
+        double t = t_eval[i];
+        if (t <= 0.0) {
+            out[i] = 0.0;   // or throw – t must be positive
+            continue;
+        }
+        double sum = 0.0;
+        for (int k = 1; k <= N_use; ++k) {
+            double s_k = k * LN2 / t;
+            auto F_val = F(s_k);
+            double realF = std::real(F_val);    // Stehfest assumes real‑valued F on the positive real axis
+            sum += V[k] * realF;
+        }
+        out[i] = (LN2 / t) * sum;
     }
     return out;
 }
