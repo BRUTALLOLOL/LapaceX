@@ -12,7 +12,7 @@ namespace py = pybind11;
 using namespace laplacex;
 
 // ---------------------------------------------------------------------------
-// Helper: convert numpy array to std::vector<double>
+// Helpers: numpy array ⇄ std::vector
 // ---------------------------------------------------------------------------
 static std::vector<double> to_vec(py::array_t<double> arr) {
     auto buf = arr.request();
@@ -24,6 +24,14 @@ static std::vector<std::complex<double>> to_cvec(py::array_t<std::complex<double
     auto buf = arr.request();
     auto* ptr = static_cast<std::complex<double>*>(buf.ptr);
     return std::vector<std::complex<double>>(ptr, ptr + buf.size);
+}
+
+// *** NEW *** convert std::vector<double> → numpy array
+static py::array_t<double> to_arr(const std::vector<double>& v) {
+    auto result = py::array_t<double>(v.size());
+    auto buf = result.request();
+    std::copy(v.begin(), v.end(), static_cast<double*>(buf.ptr));
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,16 +109,22 @@ PYBIND11_MODULE(_laplacex, m) {
         py::arg("f"), py::arg("s"), py::arg("cfg") = TransformConfig{},
         "Compute F(s) = ∫₀^∞ f(t) exp(-st) dt via adaptive Gauss-Kronrod quadrature.");
 
+    // *** FIXED Bug 1: removed std::async threading, now runs sequentially ***
     m.def("forward_batch",
         [](py::object f_py,
            py::array_t<std::complex<double>> s_arr,
            const TransformConfig& cfg) {
             auto f = [&](double t) { return f_py(t).cast<double>(); };
             auto s = to_cvec(s_arr);
-            return forward_batch(f, s, cfg);
+            std::vector<std::complex<double>> result;
+            result.reserve(s.size());
+            for (const auto& val : s) {
+                result.push_back(forward(f, val, cfg));
+            }
+            return result;  // pybind11 converts vector<complex<double>> to numpy array
         },
         py::arg("f"), py::arg("s_vals"), py::arg("cfg") = TransformConfig{},
-        "Compute F(s) for an array of complex frequencies (parallelised).");
+        "Compute F(s) for an array of complex frequencies (sequential evaluation, GIL-safe).");
 
     m.def("forward_discrete",
         [](py::array_t<double> t_arr,
@@ -198,43 +212,49 @@ PYBIND11_MODULE(_laplacex, m) {
         py::arg("rss"), py::arg("n"), py::arg("k"),
         "Bayesian Information Criterion: n*log(rss/n) + k*log(n).");
 
+    // *** FIXED Bug 2: all generators now return numpy arrays ***
     u.def("gen_step",
         [](py::array_t<double> t, double t0, double amplitude) {
-            return utils::gen_step(to_vec(t), t0, amplitude);
+            auto v = utils::gen_step(to_vec(t), t0, amplitude);
+            return to_arr(v);
         },
         py::arg("t"), py::arg("t0") = 1.0, py::arg("amplitude") = 1.0,
-        "Generate Heaviside step function.");
+        "Generate Heaviside step function (returns numpy array).");
 
     u.def("gen_damped_sine",
         [](py::array_t<double> t, double amp, double rate, double omega, double phi) {
-            return utils::gen_damped_sine(to_vec(t), amp, rate, omega, phi);
+            auto v = utils::gen_damped_sine(to_vec(t), amp, rate, omega, phi);
+            return to_arr(v);
         },
         py::arg("t"), py::arg("amplitude") = 1.0, py::arg("rate") = 0.5,
         py::arg("omega") = 2.0, py::arg("phi") = 0.0,
-        "Generate damped sinusoid A*exp(-rate*t)*cos(omega*t + phi).");
+        "Generate damped sinusoid (returns numpy array).");
 
     u.def("gen_exp_sum",
         [](py::array_t<double> t,
            py::array_t<double> amps,
            py::array_t<double> rates) {
-            return utils::gen_exp_sum(to_vec(t), to_vec(amps), to_vec(rates));
+            auto v = utils::gen_exp_sum(to_vec(t), to_vec(amps), to_vec(rates));
+            return to_arr(v);
         },
         py::arg("t"), py::arg("amplitudes"), py::arg("rates"),
-        "Generate sum of real exponentials Σ A_k * exp(-lambda_k * t).");
+        "Generate sum of real exponentials (returns numpy array).");
 
     u.def("gen_diffusion",
         [](py::array_t<double> t, double amp) {
-            return utils::gen_diffusion(to_vec(t), amp);
+            auto v = utils::gen_diffusion(to_vec(t), amp);
+            return to_arr(v);
         },
         py::arg("t"), py::arg("amplitude") = 1.0,
-        "Generate diffusion-like tail A / sqrt(t).");
+        "Generate diffusion-like tail (returns numpy array).");
 
     u.def("add_noise",
         [](py::array_t<double> f, double sigma, int seed) {
-            return utils::add_noise(to_vec(f), sigma, seed);
+            auto v = utils::add_noise(to_vec(f), sigma, seed);
+            return to_arr(v);
         },
         py::arg("f"), py::arg("sigma"), py::arg("seed") = -1,
-        "Add Gaussian white noise with given standard deviation.");
+        "Add Gaussian white noise (returns numpy array).");
 
     u.def("estimate_noise",
         [](py::array_t<double> f) { return utils::estimate_noise(to_vec(f)); },
