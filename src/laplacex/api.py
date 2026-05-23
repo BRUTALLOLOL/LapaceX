@@ -18,6 +18,7 @@ from laplacex._laplacex import (
     forward_discrete as _forward_discrete,
     inverse_weeks    as _inverse_weeks,
     decompose        as _decompose_cpp,
+    decompose_deflate as _decompose_deflate_cpp,  # ← добавить
     reconstruct      as _reconstruct_cpp,
 )
 from laplacex.components import ExponentialComponents
@@ -136,10 +137,17 @@ def decompose(
     f: np.ndarray,
     *,
     cfg: Optional[DecomposeConfig] = None,
+    auto_deflate: bool = True,
+    max_components: int = 5,
+    energy_tol: float = 1e-6,
 ) -> ExponentialComponents:
     """
     Decompose a time-series into a sum of exponential components by
     performing wavelet analysis in the logarithmic time plane.
+
+    When ``auto_deflate=True`` (default) and the single-pass CWT finds
+    only one component, the function automatically switches to iterative
+    deflation to recover weaker modes buried under the dominant one.
 
     Parameters
     ----------
@@ -149,6 +157,12 @@ def decompose(
         Signal values at ``t``.
     cfg : DecomposeConfig, optional
         Algorithm configuration.
+    auto_deflate : bool
+        If True, fall back to deflation when single-pass finds ≤ 1 component.
+    max_components : int
+        Max components to extract in deflation mode.
+    energy_tol : float
+        Stop deflation when residual energy < energy_tol * original energy.
 
     Returns
     -------
@@ -166,13 +180,24 @@ def decompose(
     True
     """
     _cfg  = cfg or DecomposeConfig()
-    comps = _decompose_cpp(
-        np.asarray(t, dtype=float),
-        np.asarray(f, dtype=float),
-        _cfg,
-    )
-    return ExponentialComponents(comps)
+    t_arr = np.asarray(t, dtype=float)
+    f_arr = np.asarray(f, dtype=float)
 
+    comps = _decompose_cpp(t_arr, f_arr, _cfg)
+
+    # Auto-deflate if single-pass missed weak components
+    if auto_deflate and len(comps) <= 1:
+        f_hat = ExponentialComponents(comps).reconstruct(t_arr)
+        residual_energy = np.sum((f_arr - f_hat)**2)
+        original_energy = np.sum(f_arr**2)
+
+        if residual_energy > energy_tol * original_energy:
+            comps = _decompose_deflate_cpp(
+                t_arr, f_arr, _cfg,
+                max_components, energy_tol,
+            )
+
+    return ExponentialComponents(comps)
 
 def reconstruct(
     components: ExponentialComponents,
