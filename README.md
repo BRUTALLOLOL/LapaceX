@@ -17,15 +17,6 @@ presence of noise and at the tails of the signal.
 
 ---
 
-## Installation
-
-```bash
-# From PyPI (pre-built wheel)
-pip install LaplaceX
-
-# From source (requires a C++17 compiler + CMake ≥ 3.18)
-pip install LaplaceX --no-binary LaplaceX
-```
 
 **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24.
 Optional extras: `matplotlib` (plotting), `pandas` (DataFrame export).
