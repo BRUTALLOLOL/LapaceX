@@ -52,6 +52,14 @@ struct DecomposeConfig {
 
     // Model selection
     bool   use_aic         = true;   ///< use AIC to prune over-fitted models
+
+    // Advanced
+    /// If true, skip the ALS rate-refinement step inside decompose().
+    /// Useful when calling from decompose_deflate(): the CWT-ridge rate is less
+    /// biased than a single-component ALS fit to a multi-component signal, so
+    /// using it for each deflation subtraction produces a cleaner residual.
+    /// Joint ALS is still applied once at the end of decompose_deflate().
+    bool   disable_als     = false;
 };
 
 /**

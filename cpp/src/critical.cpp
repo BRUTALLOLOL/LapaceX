@@ -409,8 +409,12 @@ std::vector<ExponentialComponent> decompose(
             return a.significance > b.significance;
         });
 
-    // ---- NEW: Refine rates and amplitudes (ALS) ----
-    refine_components_als(components, t, f);
+    // ---- Refine rates and amplitudes (ALS) ----
+    // Skipped when disable_als=true (used by decompose_deflate so that the
+    // unbiased CWT-ridge rate drives each deflation subtraction; joint ALS
+    // runs once at the end of decompose_deflate on the original signal).
+    if (!cfg.disable_als)
+        refine_components_als(components, t, f);
     // Re‑sort after refinement (significance was updated inside refine)
     std::sort(components.begin(), components.end(),
         [](const ExponentialComponent& a, const ExponentialComponent& b) {
@@ -455,75 +459,174 @@ std::vector<ExponentialComponent> decompose_deflate(
     if (max_components <= 0) max_components = 5;
     if (energy_tol <= 0.0) energy_tol = 1e-6;
 
-    // Use a copy of config tuned for weak component detection
-    DecomposeConfig defl_cfg = cfg;
-    defl_cfg.use_aic = false;               // we decide when to stop
-    defl_cfg.snr_threshold = cfg.snr_threshold * 0.5;   // lower threshold to catch weak modes
-    defl_cfg.ridge_threshold = cfg.ridge_threshold * 0.5;
-    defl_cfg.min_ridge_len = std::max(1, cfg.min_ridge_len - 1); // may be shorter
+    const int n = static_cast<int>(t.size());
+    const double original_energy = std::inner_product(f.begin(), f.end(), f.begin(), 0.0);
+    if (original_energy < 1e-30) return {};
 
-    // Work on a copy of the data to deflate
-    std::vector<double> residual = f;
-    double original_energy = std::inner_product(f.begin(), f.end(), f.begin(), 0.0);
+    // -----------------------------------------------------------------------
+    // Helper: solve the K-component linear LS problem on the original signal.
+    //
+    //   min_{A_0..A_{K-1}} || f - Σ A_k exp(-rates[k] t) ||²
+    //
+    // Returns {amplitudes, RSS}.  Exact closed-form solution via Gaussian
+    // elimination on the K×K normal equations — cannot get stuck in local
+    // minima, unlike iterative ALS.
+    // -----------------------------------------------------------------------
+    auto solve_ls = [&](const std::vector<double>& rates)
+        -> std::pair<std::vector<double>, double>
+    {
+        int K = static_cast<int>(rates.size());
+        std::vector<std::vector<double>> G(K, std::vector<double>(K, 0.0));
+        std::vector<double> h(K, 0.0);
+        for (int i = 0; i < n; ++i) {
+            std::vector<double> e(K);
+            for (int k = 0; k < K; ++k) e[k] = std::exp(-rates[k] * t[i]);
+            for (int k = 0; k < K; ++k) {
+                h[k] += f[i] * e[k];
+                for (int l = 0; l < K; ++l) G[k][l] += e[k] * e[l];
+            }
+        }
+        auto amps = solve_normal_eq(G, h);
+        double rss = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double pred = 0.0;
+            for (int k = 0; k < K; ++k) pred += amps[k] * std::exp(-rates[k] * t[i]);
+            rss += (f[i] - pred) * (f[i] - pred);
+        }
+        return {amps, rss};
+    };
+
+    // -----------------------------------------------------------------------
+    // Rate search range: derived from the observed time span.
+    //
+    // The slowest meaningful rate corresponds to a decay time ≈ t_max (one
+    // e-fold over the whole window), and the fastest to a decay time ≈ t_min.
+    // A factor-of-4 margin is added on each side for safety.
+    // -----------------------------------------------------------------------
+    double t_min_obs = *std::min_element(t.begin(), t.end());
+    double t_max_obs = *std::max_element(t.begin(), t.end());
+    double r_global_lo = std::max(0.25 / t_max_obs, 1e-6);
+    double r_global_hi = 4.0  / t_min_obs;
+
+    const int    n_grid     = 100;  // log-space grid density per iteration
+    const double close_tol  = 0.05; // exclude candidates within 5 % of any existing rate
+
+    std::vector<double> found_rates;
+    // RSS with 0 components = ||f||²
+    double rss_current = original_energy;
+
+    // -----------------------------------------------------------------------
+    // Sequential grid search: at each iteration find the next rate by
+    // minimising the exact (K+1)-component LS RSS over the full signal.
+    //
+    // Crucially, rate_1 is also found by grid search (NOT from CWT), because
+    // the CWT ridge for a multi-exponential signal is biased by interference
+    // from weaker components and does not reliably locate the dominant rate.
+    // -----------------------------------------------------------------------
+    // Helper: build ExponentialComponent vector from rates + LS amplitudes.
+    auto build_comps = [&](const std::vector<double>& rates) {
+        auto [amps, dummy] = solve_ls(rates);
+        std::vector<ExponentialComponent> comps;
+        for (int k = 0; k < static_cast<int>(rates.size()); ++k) {
+            ExponentialComponent c;
+            c.rate        = rates[k];
+            c.decay_time  = (rates[k] > 0) ? 1.0 / rates[k] : 0.0;
+            c.log_time    = std::log(c.decay_time > 0 ? c.decay_time : 1.0);
+            c.amplitude   = amps[k];
+            c.significance = std::abs(amps[k]);
+            comps.push_back(c);
+        }
+        return comps;
+    };
+
+    // Helper: compute RSS of a set of components against the original signal.
+    auto rss_of = [&](const std::vector<ExponentialComponent>& comps) {
+        double rss = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double pred = 0.0;
+            for (const auto& c : comps)
+                pred += c.amplitude * std::exp(-c.rate * t[i]);
+            rss += (f[i] - pred) * (f[i] - pred);
+        }
+        return rss;
+    };
+
     std::vector<ExponentialComponent> all_comps;
 
     for (int iter = 0; iter < max_components; ++iter) {
-        // Run standard decompose on the residual
-        auto comps = decompose(t, residual, defl_cfg);
-        if (comps.empty()) break;
+        if (rss_current < energy_tol * original_energy) break;
 
-        // Take the strongest component
-        ExponentialComponent comp = comps.front(); // already sorted by significance
-        // Reconstruct its contribution using original t grid
-        std::vector<double> single_recon = reconstruct({comp}, t);
-        // Subtract from residual
-        for (std::size_t i = 0; i < residual.size(); ++i)
-            residual[i] -= single_recon[i];
+        // ---- Grid search for the next rate --------------------------------
+        double best_rss_grid = rss_current;
+        double best_r        = -1.0;
 
-        all_comps.push_back(comp);
+        for (int g = 0; g < n_grid; ++g) {
+            double r = r_global_lo *
+                std::pow(r_global_hi / r_global_lo, g / (n_grid - 1.0));
 
-        // Stop if residual energy is tiny relative to original
-        double residual_energy = std::inner_product(residual.begin(), residual.end(), residual.begin(), 0.0);
-        if (residual_energy < energy_tol * original_energy)
-            break;
+            // Skip candidates within close_tol of any already-found rate
+            // to avoid near-singular Gram matrices.
+            bool too_close = false;
+            for (double er : found_rates)
+                if (std::abs(r - er) / er < close_tol) { too_close = true; break; }
+            if (too_close) continue;
+
+            std::vector<double> cand = found_rates;
+            cand.push_back(r);
+            double rss = solve_ls(cand).second;
+            if (rss < best_rss_grid) { best_rss_grid = rss; best_r = r; }
+        }
+
+        if (best_r < 0.0) break;                                        // no grid improvement
+        if ((rss_current - best_rss_grid) < 0.02 * rss_current) break;  // < 2 % gain
+
+        found_rates.push_back(best_r);
+
+        // ---- Intermediate ALS: polish rates so the RSS check is exact ----
+        // Without this, grid-quantisation error (e.g. 5.06 instead of 5.00)
+        // leaves a small residual that would incorrectly trigger another
+        // grid-search iteration and produce spurious near-duplicate components.
+        auto cur_comps = build_comps(found_rates);
+        refine_components_als(cur_comps, t, f);
+
+        // Update found_rates from ALS-refined values
+        found_rates.clear();
+        for (const auto& c : cur_comps) found_rates.push_back(c.rate);
+
+        rss_current = rss_of(cur_comps);
+        all_comps   = std::move(cur_comps);
     }
 
     if (all_comps.empty()) return {};
 
-    // Joint refinement of all found components on the original data
-    refine_components_als(all_comps, t, f);
-
-    // Normalise significance
+    // -----------------------------------------------------------------------
+    // Normalise significance, sort by significance, optional AIC pruning.
+    // -----------------------------------------------------------------------
     double sum_abs = 0.0;
     for (const auto& c : all_comps) sum_abs += std::abs(c.amplitude);
-    if (sum_abs > 0.0) {
-        for (auto& c : all_comps)
-            c.significance = std::abs(c.amplitude) / sum_abs;
-    }
+    if (sum_abs < 1e-15) return {};
+    for (auto& c : all_comps) c.significance = std::abs(c.amplitude) / sum_abs;
 
-    // Sort by significance
     std::sort(all_comps.begin(), all_comps.end(),
         [](const ExponentialComponent& a, const ExponentialComponent& b) {
             return a.significance > b.significance;
         });
 
-    // Optional AIC pruning on the final set using original cfg's flag
     if (cfg.use_aic && all_comps.size() > 1) {
-        auto rss = [&](std::size_t k) {
-            auto sub = std::vector<ExponentialComponent>(all_comps.begin(), all_comps.begin()+k);
+        auto rss_fn = [&](std::size_t k) {
+            auto sub = std::vector<ExponentialComponent>(
+                all_comps.begin(), all_comps.begin() + k);
             auto r   = reconstruct(sub, t);
             double s = 0;
             for (std::size_t idx = 0; idx < t.size(); ++idx) {
-                double d = r[idx] - f[idx];
-                s += d * d;
+                double d = r[idx] - f[idx]; s += d * d;
             }
             return s;
         };
-
-        int best_k = 1;
-        double best_aic = std::log(rss(1) / t.size()) + 2.0 * 3;
+        int    best_k   = 1;
+        double best_aic = std::log(rss_fn(1) / t.size()) + 6.0;
         for (std::size_t k = 2; k <= all_comps.size(); ++k) {
-            double a = std::log(rss(k) / t.size()) + 2.0 * 3 * k;
+            double a = std::log(rss_fn(k) / t.size()) + 2.0 * 3.0 * k;
             if (a < best_aic) { best_aic = a; best_k = static_cast<int>(k); }
         }
         all_comps.resize(best_k);

@@ -72,6 +72,7 @@ PYBIND11_MODULE(_laplacex, m) {
         .def_readwrite("noise_sigma",     &DecomposeConfig::noise_sigma)
         .def_readwrite("snr_threshold",   &DecomposeConfig::snr_threshold)
         .def_readwrite("use_aic",         &DecomposeConfig::use_aic)
+        .def_readwrite("disable_als",     &DecomposeConfig::disable_als)
         .def("__repr__", [](const DecomposeConfig& c) {
             return "<DecomposeConfig wavelet=" + c.wavelet
                  + " n_scales=" + std::to_string(c.n_scales)
