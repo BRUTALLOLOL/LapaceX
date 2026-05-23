@@ -6,6 +6,8 @@
 #include <numeric>
 #include <stdexcept>
 #include <map>
+#include <vector>
+#include <iostream>   // optional – remove after debugging
 
 namespace laplacex {
 
@@ -19,7 +21,6 @@ static double mexh(double x) {
 }
 
 // Real Continuous Wavelet Transform at scale a, translation b
-// W(a,b) = (1/sqrt(a)) * integral f(x) * psi((x-b)/a) dx
 static double cwt_point(
     const std::vector<double>& x_grid,
     const std::vector<double>& f_tilde,
@@ -33,14 +34,14 @@ static double cwt_point(
 
     for (int i = 0; i < n; ++i) {
         double xi = (x_grid[i] - b) / a;
-        double psi_val = (wavelet == "mexh") ? mexh(xi) : mexh(xi); // extend here
+        double psi_val = (wavelet == "mexh") ? mexh(xi) : mexh(xi);
         sum += f_tilde[i] * psi_val;
     }
     return inv_sqrt_a * sum * dx;
 }
 
 // ---------------------------------------------------------------------------
-// Resample to uniform log grid (simple linear interp – utils does spline)
+// Resample to uniform log grid (simple linear interp)
 // ---------------------------------------------------------------------------
 static void to_log_grid(
     const std::vector<double>& t,
@@ -60,7 +61,6 @@ static void to_log_grid(
         x_grid[i] = x_min + i * dx;
         double ti = std::exp(x_grid[i]);
 
-        // Linear interpolation in original space
         auto it = std::lower_bound(t.begin(), t.end(), ti);
         if (it == t.end()) {
             f_tilde[i] = f.back() * ti;
@@ -75,8 +75,179 @@ static void to_log_grid(
         double f0 = f[idx-1], f1 = f[idx];
         double alpha = (ti - t0) / (t1 - t0);
         double fi = f0 + alpha * (f1 - f0);
-        // f_tilde(x) = f(e^x) * e^x
         f_tilde[i] = fi * ti;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linear least squares solver for small systems (normal equations + Gauss elim)
+// ---------------------------------------------------------------------------
+static std::vector<double> solve_normal_eq(
+    const std::vector<std::vector<double>>& A,   // A^T A
+    const std::vector<double>& b)                // A^T f
+{
+    int n = static_cast<int>(A.size());
+    if (n == 0) return {};
+    // Augmented matrix
+    std::vector<std::vector<double>> aug(n, std::vector<double>(n+1, 0.0));
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) aug[i][j] = A[i][j];
+        aug[i][n] = b[i];
+    }
+
+    // Gaussian elimination with partial pivoting
+    for (int col = 0; col < n; ++col) {
+        int pivot = col;
+        double max_val = std::abs(aug[col][col]);
+        for (int row = col+1; row < n; ++row) {
+            if (std::abs(aug[row][col]) > max_val) {
+                max_val = std::abs(aug[row][col]);
+                pivot = row;
+            }
+        }
+        if (max_val < 1e-15) continue; // singular – leave as zero
+        if (pivot != col) std::swap(aug[col], aug[pivot]);
+
+        double div = aug[col][col];
+        for (int j = col; j <= n; ++j) aug[col][j] /= div;
+        for (int i = 0; i < n; ++i) {
+            if (i == col) continue;
+            double factor = aug[i][col];
+            for (int j = col; j <= n; ++j) aug[i][j] -= factor * aug[col][j];
+        }
+    }
+
+    std::vector<double> x(n);
+    for (int i = 0; i < n; ++i) x[i] = aug[i][n];
+    return x;
+}
+
+// ---------------------------------------------------------------------------
+// Refine component rates and amplitudes via alternating least squares
+// ---------------------------------------------------------------------------
+static void refine_components_als(
+    std::vector<ExponentialComponent>& components,
+    const std::vector<double>& t,
+    const std::vector<double>& f)
+{
+    if (components.empty()) return;
+    // Only refine if all components are real (no oscillation)
+    for (const auto& c : components)
+        if (c.frequency != 0.0) return;  // ALS only for pure exponentials
+
+    const int n_times = static_cast<int>(t.size());
+    const int n_comp  = static_cast<int>(components.size());
+
+    const int outer_iter = 3;
+    const int ternary_iter = 40;
+
+    for (int iter = 0; iter < outer_iter; ++iter) {
+        for (int k = 0; k < n_comp; ++k) {
+            double rate_init = components[k].rate;
+            if (rate_init <= 0.0) rate_init = 0.1;
+
+            double lo = rate_init * 0.25;
+            double hi = rate_init * 4.0;
+            if (lo < 1e-12) lo = 1e-12;   // avoid zero rate
+
+            // Ternary search for best rate of component k
+            auto rss_for_rate = [&](double r) -> double {
+                // Build design matrix for current set of rates (with candidate r for k)
+                std::vector<double> rates = std::vector<double>(n_comp);
+                for (int i = 0; i < n_comp; ++i) rates[i] = components[i].rate;
+                rates[k] = r;
+
+                // Form A (n_times x n_comp)
+                std::vector<std::vector<double>> A(n_times, std::vector<double>(n_comp, 0.0));
+                for (int i = 0; i < n_times; ++i) {
+                    for (int j = 0; j < n_comp; ++j) {
+                        A[i][j] = std::exp(-rates[j] * t[i]);
+                    }
+                }
+
+                // Compute A^T A and A^T f
+                std::vector<std::vector<double>> ATA(n_comp, std::vector<double>(n_comp, 0.0));
+                std::vector<double> ATf(n_comp, 0.0);
+                for (int i = 0; i < n_times; ++i) {
+                    for (int p = 0; p < n_comp; ++p) {
+                        double aip = A[i][p];
+                        for (int q = 0; q < n_comp; ++q) {
+                            ATA[p][q] += aip * A[i][q];
+                        }
+                        ATf[p] += aip * f[i];
+                    }
+                }
+
+                // Solve for amplitudes
+                std::vector<double> amps = solve_normal_eq(ATA, ATf);
+
+                // Compute RSS
+                double rss = 0.0;
+                for (int i = 0; i < n_times; ++i) {
+                    double pred = 0.0;
+                    for (int j = 0; j < n_comp; ++j)
+                        pred += amps[j] * A[i][j];
+                    double diff = pred - f[i];
+                    rss += diff * diff;
+                }
+                return rss;
+            };
+
+            // Ternary search
+            for (int step = 0; step < ternary_iter; ++step) {
+                double m1 = lo + (hi - lo) / 3.0;
+                double m2 = hi - (hi - lo) / 3.0;
+                double f1 = rss_for_rate(m1);
+                double f2 = rss_for_rate(m2);
+                if (f1 < f2) {
+                    hi = m2;
+                } else {
+                    lo = m1;
+                }
+            }
+            double best_rate = (lo + hi) * 0.5;
+            components[k].rate = best_rate;
+        }
+
+        // After refining all components, recompute amplitudes for all simultaneously
+        // (using updated rates)
+        std::vector<double> rates(n_comp);
+        for (int j = 0; j < n_comp; ++j) rates[j] = components[j].rate;
+
+        std::vector<std::vector<double>> A(n_times, std::vector<double>(n_comp));
+        for (int i = 0; i < n_times; ++i)
+            for (int j = 0; j < n_comp; ++j)
+                A[i][j] = std::exp(-rates[j] * t[i]);
+
+        std::vector<std::vector<double>> ATA(n_comp, std::vector<double>(n_comp, 0.0));
+        std::vector<double> ATf(n_comp, 0.0);
+        for (int i = 0; i < n_times; ++i) {
+            for (int p = 0; p < n_comp; ++p) {
+                double aip = A[i][p];
+                for (int q = 0; q < n_comp; ++q) ATA[p][q] += aip * A[i][q];
+                ATf[p] += aip * f[i];
+            }
+        }
+        std::vector<double> new_amps = solve_normal_eq(ATA, ATf);
+        for (int j = 0; j < n_comp; ++j) {
+            components[j].amplitude = new_amps[j];
+            if (components[j].rate > 0.0) {
+                components[j].decay_time = 1.0 / components[j].rate;
+                components[j].log_time   = std::log(components[j].decay_time);
+            } else {
+                components[j].decay_time = std::numeric_limits<double>::infinity();
+                components[j].log_time   = -std::numeric_limits<double>::infinity();
+            }
+        }
+    }
+
+    // Final recompute amplitudes one last time (already done in the last inner loop)
+    // Re‑normalise significance by absolute amplitudes
+    double sum_abs = 0.0;
+    for (const auto& c : components) sum_abs += std::abs(c.amplitude);
+    if (sum_abs > 0.0) {
+        for (auto& c : components)
+            c.significance = std::abs(c.amplitude) / sum_abs;
     }
 }
 
@@ -111,7 +282,6 @@ std::vector<ExponentialComponent> decompose(
         scales[j] = std::exp(log_amin + j * (log_amax - log_amin) / (ns - 1));
 
     // 3. Compute CWT matrix W[j][i] = W(scale_j, x_i)
-    // W shape: (ns, n)
     std::vector<std::vector<double>> W(ns, std::vector<double>(n, 0.0));
     double W_max = 0.0;
 
@@ -127,7 +297,6 @@ std::vector<ExponentialComponent> decompose(
     // 4. Noise estimation from finest scales
     double noise_sigma = cfg.noise_sigma;
     if (noise_sigma < 0.0) {
-        // MAD of finest-scale coefficients
         std::vector<double> fine(W[0].begin(), W[0].end());
         for (auto& v : fine) v = std::abs(v);
         std::sort(fine.begin(), fine.end());
@@ -135,7 +304,6 @@ std::vector<ExponentialComponent> decompose(
     }
 
     // 5. Find local maxima in x for each scale → ridge points
-    // ridge_map[scale_index] = list of (x_index, |W|)
     std::vector<std::vector<std::pair<int,double>>> ridges(ns);
     for (int j = 0; j < ns; ++j) {
         for (int i = 1; i + 1 < n; ++i) {
@@ -149,7 +317,6 @@ std::vector<ExponentialComponent> decompose(
     }
 
     // 6. Connect ridge points across scales → ridge lines
-    // Simple greedy: for each maximum at coarsest scale, trace down to finer
     struct RidgeLine {
         std::vector<std::pair<int,int>> points; // (scale_idx, x_idx)
         double peak_energy = 0.0;
@@ -168,7 +335,6 @@ std::vector<ExponentialComponent> decompose(
 
         int cur_x = xi;
         for (int j = ns-2; j >= 0; --j) {
-            // Find closest ridge in scale j within +-3 pixels of cur_x
             int best_i = -1;
             double best_d = 1e9;
             for (auto& [ri, re] : ridges[j]) {
@@ -200,7 +366,7 @@ std::vector<ExponentialComponent> decompose(
 
         double x_k = x_grid[i];
         double t_k = std::exp(x_k);
-        double A_k = line.peak_energy * scales[j]; // un-normalise
+        double A_k = line.peak_energy * scales[j]; // un-normalised
 
         // SNR check
         if (A_k < cfg.snr_threshold * noise_sigma) continue;
@@ -212,15 +378,13 @@ std::vector<ExponentialComponent> decompose(
         comp.amplitude  = A_k;
         comp.significance = A_k; // will normalise below
 
-        // Oscillation: check sign changes of W across x at this scale
-        // count zero crossings of W[j] near i within window = 2*scale
+        // Oscillation detection
         int win = static_cast<int>(scales[j] / (x_grid[1]-x_grid[0]) * 2);
         int cnt = 0;
         for (int k = std::max(0,i-win); k+1 < std::min(n, i+win); ++k) {
             if (W[j][k] * W[j][k+1] < 0) ++cnt;
         }
         if (cnt >= 2) {
-            // Estimate oscillation frequency from spacing of zero crossings
             comp.frequency = cnt * M_PI / (2.0 * scales[j]);
         }
 
@@ -240,9 +404,16 @@ std::vector<ExponentialComponent> decompose(
             return a.significance > b.significance;
         });
 
-    // 10. Optional AIC pruning
+    // ---- NEW: Refine rates and amplitudes (ALS) ----
+    refine_components_als(components, t, f);
+    // Re‑sort after refinement (significance was updated inside refine)
+    std::sort(components.begin(), components.end(),
+        [](const ExponentialComponent& a, const ExponentialComponent& b) {
+            return a.significance > b.significance;
+        });
+
+    // 10. Optional AIC pruning (using refined components)
     if (cfg.use_aic && components.size() > 1) {
-        // Keep adding components while AIC improves
         auto rss = [&](std::size_t k) {
             auto sub = std::vector<ExponentialComponent>(components.begin(), components.begin()+k);
             auto r   = reconstruct(sub, t);
@@ -255,7 +426,7 @@ std::vector<ExponentialComponent> decompose(
         };
 
         int best_k = 1;
-        double best_aic = std::log(rss(1) / t.size()) + 2.0 * 3; // 3 params/comp
+        double best_aic = std::log(rss(1) / t.size()) + 2.0 * 3;
         for (std::size_t k = 2; k <= components.size(); ++k) {
             double a = std::log(rss(k) / t.size()) + 2.0 * 3 * k;
             if (a < best_aic) { best_aic = a; best_k = static_cast<int>(k); }
@@ -297,7 +468,6 @@ std::vector<std::complex<double>> reconstruct_laplace(
     for (std::size_t i = 0; i < s_eval.size(); ++i) {
         std::complex<double> s = s_eval[i];
         for (const auto& c : components) {
-            // F(s) = A / (s + lambda)  for purely real exponential
             std::complex<double> denom = s + std::complex<double>(c.rate, -c.frequency);
             if (std::abs(denom) > 1e-30)
                 out[i] += c.amplitude / denom;
