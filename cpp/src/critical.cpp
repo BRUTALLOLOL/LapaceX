@@ -131,9 +131,6 @@ static void refine_components_als(
     const std::vector<double>& f)
 {
     if (components.empty()) return;
-    // Only refine if all components are real (no oscillation)
-    for (const auto& c : components)
-        if (c.frequency != 0.0) return;  // ALS only for pure exponentials
 
     const int n_times = static_cast<int>(t.size());
     const int n_comp  = static_cast<int>(components.size());
@@ -143,6 +140,11 @@ static void refine_components_als(
 
     for (int iter = 0; iter < outer_iter; ++iter) {
         for (int k = 0; k < n_comp; ++k) {
+            // Skip oscillatory components in rate search — they need different
+            // (damped-cosine) basis functions. Their amplitudes are still
+            // updated in the global amplitude solve at the end of each outer pass.
+            if (components[k].frequency != 0.0) continue;
+
             double rate_init = components[k].rate;
             if (rate_init <= 0.0) rate_init = 0.1;
 
@@ -378,8 +380,11 @@ std::vector<ExponentialComponent> decompose(
         comp.amplitude  = A_k;
         comp.significance = A_k; // will normalise below
 
-        // Oscillation detection
-        int win = static_cast<int>(scales[j] / (x_grid[1]-x_grid[0]) * 2);
+        // Oscillation detection – count sign changes of W within a LOCAL window.
+        // Capped at 20 grid points each side to avoid false positives: at coarse
+        // scales the uncapped window spans the whole grid and the Mexican Hat
+        // CWT always shows sign changes that are NOT true signal oscillations.
+        int win = std::min(static_cast<int>(scales[j] / (x_grid[1]-x_grid[0]) * 2), 20);
         int cnt = 0;
         for (int k = std::max(0,i-win); k+1 < std::min(n, i+win); ++k) {
             if (W[j][k] * W[j][k+1] < 0) ++cnt;
