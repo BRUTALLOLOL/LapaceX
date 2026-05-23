@@ -166,6 +166,19 @@ PYBIND11_MODULE(_laplacex, m) {
         py::arg("t"), py::arg("f"), py::arg("cfg") = DecomposeConfig{},
         "Decompose a time-series into exponential components using wavelet ridges in log-plane.");
 
+    m.def("decompose_deflate",
+        [](py::array_t<double> t_arr,
+           py::array_t<double> f_arr,
+           const DecomposeConfig& cfg,
+           int max_components,
+           double energy_tol) {
+            return decompose_deflate(to_vec(t_arr), to_vec(f_arr), cfg, max_components, energy_tol);
+        },
+        py::arg("t"), py::arg("f"), py::arg("cfg") = DecomposeConfig{},
+        py::arg("max_components") = 5,
+        py::arg("energy_tol") = 1e-6,
+        "Decompose using iterative deflation: extracts dominant mode from residual repeatedly, then joint ALS refinement.");
+
     // -----------------------------------------------------------------------
     // Reconstruction
     // -----------------------------------------------------------------------
