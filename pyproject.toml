@@ -1,0 +1,87 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.9",
+    "pybind11>=2.12",
+]
+build-backend = "scikit_build_core.build"
+
+# ---------------------------------------------------------------------------
+[project]
+name            = "LaplaceX"
+version         = "0.1.0"
+description     = "Industrial-grade Laplace transform library: stable forward and inverse transforms via logarithmic-plane wavelet decomposition"
+readme          = "README.md"
+license         = { text = "MIT" }
+authors         = [{ name = "Vozmishchev Artem" }]
+keywords        = [
+    "laplace-transform", "inverse-laplace", "signal-processing",
+    "numerical-methods", "exponential-decomposition", "wavelet",
+    "scientific-computing",
+]
+classifiers     = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.10"
+dependencies    = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+plot    = ["matplotlib>=3.7"]
+data    = ["pandas>=2.0"]
+dev     = [
+    "pytest>=7.0",
+    "pytest-benchmark",
+    "hypothesis",
+    "scipy",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+    "ruff",
+    "mypy",
+]
+all     = ["LaplaceX[plot,data,dev]"]
+
+[project.urls]
+Homepage       = "https://github.com/YOUR_USERNAME/LaplaceX"
+Documentation  = "https://github.com/YOUR_USERNAME/LaplaceX#readme"
+Repository     = "https://github.com/YOUR_USERNAME/LaplaceX"
+"Bug Tracker"  = "https://github.com/YOUR_USERNAME/LaplaceX/issues"
+
+# ---------------------------------------------------------------------------
+[tool.scikit-build]
+wheel.packages      = ["src/laplacex"]
+build-dir           = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake]
+build-type = "Release"
+
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths       = ["tests"]
+addopts         = "-v --tb=short"
+
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length    = 99
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
