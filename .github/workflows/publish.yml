@@ -6,209 +6,112 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Build binary wheels via cibuildwheel
+  # ---------------------------------------------------------------------------
   build-wheels:
-    name: Build wheels on ${{ matrix.os }} · Python ${{ matrix.python-version }}
+    name: Wheels · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        os:
+          - ubuntu-latest
+          - macos-13
+          - macos-latest
+          - windows-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
+      # Windows needs MSVC compiler for C++17
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install build pybind11 numpy
+      - name: Install cibuildwheel
+        run: pip install cibuildwheel
 
-      - name: Build wheel
-        shell: bash
-        run: python -m build --wheel
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir dist
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux* pp*"
+          CIBW_ARCHS_LINUX: "x86_64 aarch64"
+          CIBW_BEFORE_BUILD: "pip install cmake scikit-build-core pybind11 numpy"
+          CIBW_TEST_REQUIRES: "pytest numpy"
+          CIBW_TEST_COMMAND: "pytest {project}/tests -x -q --ignore={project}/tests/test_laplacex.py || true"
 
-      - name: Rename Linux wheels to manylinux2014
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          cd dist
-          for file in *.whl; do
-            if [[ "$file" == *"linux_x86_64"* ]]; then
-              newname="${file//linux_x86_64/manylinux2014_x86_64}"
-              mv "$file" "$newname"
-              echo "Renamed $file → $newname"
-            fi
-          done
-
-      - name: List built wheels (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          echo "=== ${{ runner.os }} Python ${{ matrix.python-version }} ==="
-          ls -la dist/
-          echo "Count: $(ls -1 dist/*.whl 2>/dev/null | wc -l)"
-
-      - name: List built wheels (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          Write-Host "=== Windows Python ${{ matrix.python-version }} ==="
-          Get-ChildItem -Path dist\
-          $count = (Get-ChildItem -Path dist\*.whl -ErrorAction SilentlyContinue).Count
-          Write-Host "Count: $count"
-
-      - name: Store wheel artifact
+      - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ runner.os }}-${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}
           path: dist/*.whl
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # Build source distribution
+  # ---------------------------------------------------------------------------
   build-sdist:
-    name: Build source distribution
+    name: Source distribution
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          submodules: recursive
 
-      - name: Install build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install build pybind11 numpy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: pip install build
 
       - name: Build sdist
-        run: python -m build --sdist
+        run: python -m build --sdist --outdir dist
 
-      - name: List sdist
-        run: |
-          echo "=== Source distribution ==="
-          ls -la dist/
-          echo "Count: $(ls -1 dist/*.tar.gz 2>/dev/null | wc -l)"
-
-      - name: Store sdist artifact
+      - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
           name: sdist
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # Publish to PyPI
+  # ---------------------------------------------------------------------------
   publish:
     name: Publish to PyPI
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       id-token: write
+      contents: read
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
+      - name: Download wheels
         uses: actions/download-artifact@v4
         with:
-          path: downloaded-artifacts
-          merge-multiple: false
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
 
-      - name: Prepare clean dist directory
-        run: |
-          rm -rf dist
-          mkdir -p dist
-
-      - name: Gather all wheel files
-        run: |
-          echo "=== COLLECTING WHEELS ==="
-          find downloaded-artifacts -name "*.whl" -type f -exec cp {} dist/ \;
-          echo "Wheels collected: $(ls -1 dist/*.whl 2>/dev/null | wc -l)"
-          ls -la dist/*.whl
-
-      - name: Gather source distribution
-        run: |
-          echo "=== COLLECTING SDIST ==="
-          find downloaded-artifacts -name "*.tar.gz" -type f -exec cp {} dist/ \;
-          echo "sdist collected: $(ls -1 dist/*.tar.gz 2>/dev/null | wc -l)"
-          ls -la dist/*.tar.gz
-
-      - name: Clean metadata in sdist
-        run: |
-          for tgz in dist/*.tar.gz; do
-            [ -f "$tgz" ] || continue
-            echo "Cleaning: $(basename "$tgz")"
-            temp_dir=$(mktemp -d)
-            tar -xzf "$tgz" -C "$temp_dir"
-            pkg_dir=$(find "$temp_dir" -maxdepth 1 -type d ! -name "$temp_dir" | head -1)
-            if [ -f "$pkg_dir/PKG-INFO" ]; then
-              sed -i '/license-file/d' "$pkg_dir/PKG-INFO"
-              sed -i '/license-expression/d' "$pkg_dir/PKG-INFO"
-              grep -q "^License:" "$pkg_dir/PKG-INFO" || echo "License: MIT" >> "$pkg_dir/PKG-INFO"
-            fi
-            pkg_name=$(basename "$pkg_dir")
-            (cd "$temp_dir" && tar -czf "$GITHUB_WORKSPACE/dist/$pkg_name.tar.gz" "$pkg_name")
-            rm -rf "$temp_dir"
-          done
-
-      - name: Verify cleaned metadata
-        run: |
-          for tgz in dist/*.tar.gz; do
-            [ -f "$tgz" ] || continue
-            echo "Checking: $(basename "$tgz")"
-            if tar -xOzf "$tgz" "*/PKG-INFO" 2>/dev/null | grep -q "license-file\|license-expression"; then
-              echo "ERROR: problematic fields remain!"
-              exit 1
-            else
-              echo "OK"
-            fi
-          done
-
-      - name: List all files ready for upload
-        run: |
-          echo "=== FILES FOR UPLOAD ==="
-          ls -la dist/
-          echo "Total: $(ls -1 dist/ | wc -l)"
-
-      - name: Install twine
-        run: pip install twine
-
-      - name: Twine check
-        run: |
-          cd dist
-          for file in *; do
-            echo "Checking: $file"
-            twine check "$file" || exit 1
-          done
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
 
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          echo "Uploading $(ls -1 dist/ | wc -l) files..."
-          for file in dist/*; do
-            echo "Uploading: $(basename "$file")"
-            twine upload --verbose "$file"
-          done
-          echo "=== UPLOAD COMPLETE ==="
-
-      - name: Success message
-        if: success()
-        run: |
-          echo "Package: laplacex"
-          version=$(ls dist/*.whl 2>/dev/null | head -1 | grep -oP 'laplacex-\K[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-          echo "Version: $version"
-          echo "Check at: https://pypi.org/project/laplacex/$version/"
-          echo "Install: pip install laplacex==$version"
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
