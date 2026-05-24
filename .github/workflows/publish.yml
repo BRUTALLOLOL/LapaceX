@@ -24,6 +24,12 @@ jobs:
         with:
           submodules: true
 
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -48,7 +54,6 @@ jobs:
         with:
           name: dist-${{ matrix.os }}-${{ matrix.python }}
           path: dist/*.whl
-
   # ---------------------------------------------------------------------------
   # Build sdist (source distribution)
   # ---------------------------------------------------------------------------
