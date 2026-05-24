@@ -14,6 +14,8 @@ endif()
 
 if(MSVC)
   add_compile_options(/O2 /W3)
+  # MSVC does not define M_PI, M_E, etc. from <cmath> unless this is set.
+  add_compile_definitions(_USE_MATH_DEFINES)
 else()
   add_compile_options(-O3 -march=native -Wall -Wextra -Wpedantic)
 endif()
