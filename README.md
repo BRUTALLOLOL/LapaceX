@@ -140,31 +140,6 @@ x, ft = utils.to_log_plane(t, f, n=512)
 
 ---
 
-## Building from Source
-
-```bash
-git clone https://github.com/YOUR_USERNAME/LaplaceX
-cd LaplaceX
-pip install -e ".[dev]"
-```
-
-Requires: CMake ≥ 3.18, a C++17 compiler, pybind11.
-
-### Running tests
-
-```bash
-pytest tests/ -v
-```
-
-### Building wheels locally
-
-```bash
-pip install cibuildwheel
-python -m cibuildwheel --platform linux
-```
-
----
-
 ## Theoretical Background
 
 LaplaceX is based on the observation that the Laplace kernel
