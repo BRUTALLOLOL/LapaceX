@@ -7,9 +7,10 @@ on:
 
 jobs:
   build-wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }} · Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
@@ -17,22 +18,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Install build dependencies
         shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install build pybind11 numpy
 
-      - name: Build wheels
+      - name: Build wheel
         shell: bash
         run: python -m build --wheel
 
-      - name: Rename Linux wheels to manylinux
+      - name: Rename Linux wheels to manylinux2014
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -45,24 +52,24 @@ jobs:
             fi
           done
 
-      - name: Debug - list built wheels (Unix)
+      - name: List built wheels (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          echo "=== Built wheels for ${{ runner.os }} Python ${{ matrix.python-version }} ==="
+          echo "=== ${{ runner.os }} Python ${{ matrix.python-version }} ==="
           ls -la dist/
-          echo "=== Wheel count: $(ls -1 dist/*.whl 2>/dev/null | wc -l) ==="
+          echo "Count: $(ls -1 dist/*.whl 2>/dev/null | wc -l)"
 
-      - name: Debug - list built wheels (Windows)
+      - name: List built wheels (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          Write-Host "=== Built wheels for Windows Python ${{ matrix.python-version }} ==="
+          Write-Host "=== Windows Python ${{ matrix.python-version }} ==="
           Get-ChildItem -Path dist\
-          $wheelCount = (Get-ChildItem -Path dist\*.whl -ErrorAction SilentlyContinue).Count
-          Write-Host "=== Wheel count: $wheelCount ==="
+          $count = (Get-ChildItem -Path dist\*.whl -ErrorAction SilentlyContinue).Count
+          Write-Host "Count: $count"
 
-      - name: Store wheels
+      - name: Store wheel artifact
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ runner.os }}-${{ matrix.python-version }}
@@ -80,7 +87,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
           pip install build pybind11 numpy
@@ -88,13 +95,13 @@ jobs:
       - name: Build sdist
         run: python -m build --sdist
 
-      - name: Debug - list built sdist
+      - name: List sdist
         run: |
-          echo "=== Built source distribution ==="
+          echo "=== Source distribution ==="
           ls -la dist/
-          echo "=== sdist count: $(ls -1 dist/*.tar.gz 2>/dev/null | wc -l) ==="
+          echo "Count: $(ls -1 dist/*.tar.gz 2>/dev/null | wc -l)"
 
-      - name: Store sdist
+      - name: Store sdist artifact
         uses: actions/upload-artifact@v4
         with:
           name: sdist
@@ -110,8 +117,7 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -119,171 +125,90 @@ jobs:
           path: downloaded-artifacts
           merge-multiple: false
 
-      - name: Debug - show downloaded artifacts structure
-        run: |
-          echo "=== DOWNLOADED ARTIFACTS STRUCTURE ==="
-          find downloaded-artifacts -type f | sort
-          echo ""
-          echo "=== Directory tree ==="
-          ls -laR downloaded-artifacts/
-
-      - name: Create clean dist directory
+      - name: Prepare clean dist directory
         run: |
           rm -rf dist
           mkdir -p dist
-          echo "=== Created clean dist directory ==="
 
-      - name: Copy all wheel files
+      - name: Gather all wheel files
         run: |
-          echo "=== COPYING WHEEL FILES ==="
-          wheel_files=$(find downloaded-artifacts -name "*.whl" -type f)
-          if [ -z "$wheel_files" ]; then
-            echo "ERROR: No wheel files found!"
-            exit 1
-          fi
-          echo "$wheel_files" | while read -r file; do
-            cp "$file" dist/
-            echo "Copied: $file"
-          done
-          wheel_count=$(ls -1 dist/*.whl 2>/dev/null | wc -l)
-          echo ""
-          echo "Total wheel files copied: $wheel_count"
-          echo ""
-          echo "=== Wheels in dist directory ==="
+          echo "=== COLLECTING WHEELS ==="
+          find downloaded-artifacts -name "*.whl" -type f -exec cp {} dist/ \;
+          echo "Wheels collected: $(ls -1 dist/*.whl 2>/dev/null | wc -l)"
           ls -la dist/*.whl
 
-      - name: Copy source distribution
+      - name: Gather source distribution
         run: |
-          echo "=== COPYING SOURCE DISTRIBUTION ==="
-          sdist_files=$(find downloaded-artifacts -name "*.tar.gz" -type f)
-          if [ -z "$sdist_files" ]; then
-            echo "ERROR: No source distribution files found!"
-            exit 1
-          fi
-          echo "$sdist_files" | while read -r file; do
-            cp "$file" dist/
-            echo "Copied: $file"
-          done
-          sdist_count=$(ls -1 dist/*.tar.gz 2>/dev/null | wc -l)
-          echo ""
-          echo "Total source distributions copied: $sdist_count"
-          echo ""
-          echo "=== Source distributions in dist directory ==="
+          echo "=== COLLECTING SDIST ==="
+          find downloaded-artifacts -name "*.tar.gz" -type f -exec cp {} dist/ \;
+          echo "sdist collected: $(ls -1 dist/*.tar.gz 2>/dev/null | wc -l)"
           ls -la dist/*.tar.gz
 
-      - name: Clean metadata from source distributions
+      - name: Clean metadata in sdist
         run: |
-          echo "=== CLEANING METADATA FROM SOURCE DISTRIBUTIONS ==="
           for tgz in dist/*.tar.gz; do
-            if [ -f "$tgz" ]; then
-              echo ""
-              echo "Processing: $(basename "$tgz")"
-              temp_dir=$(mktemp -d)
-              tar -xzf "$tgz" -C "$temp_dir"
-              pkg_dir=$(find "$temp_dir" -maxdepth 1 -type d | grep -v "^$temp_dir$" | head -1)
-              if [ -f "$pkg_dir/PKG-INFO" ]; then
-                echo "  Cleaning PKG-INFO..."
-                sed -i '/license-file/d' "$pkg_dir/PKG-INFO"
-                sed -i '/license-expression/d' "$pkg_dir/PKG-INFO"
-                if ! grep -q "^License:" "$pkg_dir/PKG-INFO"; then
-                  echo "License: MIT" >> "$pkg_dir/PKG-INFO"
-                  echo "  Added License: MIT field"
-                fi
-                echo "  PKG-INFO cleaned successfully"
-              fi
-              pkg_basename=$(basename "$pkg_dir")
-              (cd "$temp_dir" && tar -czf "$GITHUB_WORKSPACE/dist/$pkg_basename.tar.gz" "$pkg_basename")
-              rm -rf "$temp_dir"
-              echo "  Repackaged: $(basename "$tgz")"
+            [ -f "$tgz" ] || continue
+            echo "Cleaning: $(basename "$tgz")"
+            temp_dir=$(mktemp -d)
+            tar -xzf "$tgz" -C "$temp_dir"
+            pkg_dir=$(find "$temp_dir" -maxdepth 1 -type d ! -name "$temp_dir" | head -1)
+            if [ -f "$pkg_dir/PKG-INFO" ]; then
+              sed -i '/license-file/d' "$pkg_dir/PKG-INFO"
+              sed -i '/license-expression/d' "$pkg_dir/PKG-INFO"
+              grep -q "^License:" "$pkg_dir/PKG-INFO" || echo "License: MIT" >> "$pkg_dir/PKG-INFO"
             fi
+            pkg_name=$(basename "$pkg_dir")
+            (cd "$temp_dir" && tar -czf "$GITHUB_WORKSPACE/dist/$pkg_name.tar.gz" "$pkg_name")
+            rm -rf "$temp_dir"
           done
 
       - name: Verify cleaned metadata
         run: |
-          echo "=== VERIFYING CLEANED METADATA ==="
           for tgz in dist/*.tar.gz; do
-            if [ -f "$tgz" ]; then
-              echo ""
-              echo "Checking: $(basename "$tgz")"
-              echo "--- PKG-INFO content (first 15 lines) ---"
-              tar -xOzf "$tgz" "*/PKG-INFO" 2>/dev/null | head -15
-              if tar -xOzf "$tgz" "*/PKG-INFO" 2>/dev/null | grep -q "license-file\|license-expression"; then
-                echo "❌ ERROR: Problematic fields still present!"
-                exit 1
-              else
-                echo "✅ No problematic fields found"
-              fi
-              echo "---"
+            [ -f "$tgz" ] || continue
+            echo "Checking: $(basename "$tgz")"
+            if tar -xOzf "$tgz" "*/PKG-INFO" 2>/dev/null | grep -q "license-file\|license-expression"; then
+              echo "ERROR: problematic fields remain!"
+              exit 1
+            else
+              echo "OK"
             fi
           done
 
       - name: List all files ready for upload
         run: |
-          echo "=== FILES READY FOR UPLOAD ==="
-          echo "Total files: $(ls -1 dist/ | wc -l)"
-          echo ""
+          echo "=== FILES FOR UPLOAD ==="
           ls -la dist/
-          echo ""
-          echo "=== File types ==="
-          file dist/* || true
-
-      - name: Set up Python for upload
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+          echo "Total: $(ls -1 dist/ | wc -l)"
 
       - name: Install twine
-        run: |
-          python -m pip install --upgrade pip
-          pip install --upgrade twine build
+        run: pip install twine
 
-      - name: Run twine check on all files
+      - name: Twine check
         run: |
-          echo "=== RUNNING TWINE CHECK ==="
           cd dist
           for file in *; do
-            echo ""
             echo "Checking: $file"
-            if twine check "$file" 2>&1; then
-              echo "✅ Passed: $file"
-            else
-              echo "❌ Failed: $file"
-              exit 1
-            fi
+            twine check "$file" || exit 1
           done
-          cd ..
 
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: |
-          echo "=== PUBLISHING TO PyPI ==="
           echo "Uploading $(ls -1 dist/ | wc -l) files..."
-          echo ""
           for file in dist/*; do
-            if [ -f "$file" ]; then
-              echo "Uploading: $(basename "$file")"
-              echo "Size: $(du -h "$file" | cut -f1)"
-              if twine upload --verbose "$file"; then
-                echo "✅ Successfully uploaded: $(basename "$file")"
-              else
-                echo "❌ Failed to upload: $(basename "$file")"
-                echo "Continuing with next file..."
-              fi
-              echo ""
-            fi
+            echo "Uploading: $(basename "$file")"
+            twine upload --verbose "$file"
           done
-          echo "=== UPLOAD PROCESS COMPLETED ==="
+          echo "=== UPLOAD COMPLETE ==="
 
-      - name: Final success message
+      - name: Success message
         if: success()
         run: |
-          echo "🎉🎉🎉 SUCCESS! 🎉🎉🎉"
           echo "Package: laplacex"
           version=$(ls dist/*.whl 2>/dev/null | head -1 | grep -oP 'laplacex-\K[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
           echo "Version: $version"
-          echo ""
           echo "Check at: https://pypi.org/project/laplacex/$version/"
-          echo ""
-          echo "Install with: pip install laplacex==$version"
+          echo "Install: pip install laplacex==$version"
