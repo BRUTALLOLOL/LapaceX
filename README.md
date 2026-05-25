@@ -34,7 +34,7 @@ from laplacex import laplace, inverse, decompose, reconstruct, utils
 s_vals = np.array([1+0j, 2+0j, 3+1j])
 F = laplace(lambda t: np.exp(-2*t), s_vals)
 
-# --- 2. Inverse transform (Weeks–Laguerre method) ---------------------------
+# --- 2. Inverse transform  ---------------------------
 t = np.linspace(0.1, 5, 100)
 f_rec = inverse(lambda s: 1/(s+2), t)          # recovers exp(-2t)
 
